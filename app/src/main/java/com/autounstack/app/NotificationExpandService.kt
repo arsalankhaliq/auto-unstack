@@ -26,6 +26,7 @@ class NotificationExpandService : AccessibilityService() {
     private var activeSessionLocked: Boolean? = null
     private var activeShadeWindowId: Int? = null
     private var hasRunInitialUnlockedBatch = false
+    private var suppressUserActionClicks = false
     private var isScreenInteractive = true
     private var lockScreenReadyAt = 0L
     private var isScreenStateReceiverRegistered = false
@@ -209,6 +210,14 @@ class NotificationExpandService : AccessibilityService() {
         // must not clear this; resetSession() is the only place it goes false.
         if (!isLocked && !hasRunInitialUnlockedBatch) {
             hasRunInitialUnlockedBatch = processInitialUnlockedBatch(root)
+            if (hasRunInitialUnlockedBatch) {
+                suppressUserActionClicks = true
+            }
+            return
+        }
+
+        if (shouldIgnoreScanAfterExpand(reason)) {
+            Log.d(TAG, "Ignoring $reason after groups were expanded")
             return
         }
 
@@ -267,7 +276,9 @@ class NotificationExpandService : AccessibilityService() {
                     val alreadyQueued = candidates.any { candidate ->
                         candidate.keys.any { it in keys }
                     }
-                    if (keys.none { it in processedCandidates } && !alreadyQueued) {
+                    if (isLikelyAlreadyExpanded(clickableParent)) {
+                        processedCandidates.addAll(keys)
+                    } else if (keys.none { it in processedCandidates } && !alreadyQueued) {
                         val bounds = Rect()
                         clickableParent.getBoundsInScreen(bounds)
                         candidates.add(
@@ -349,6 +360,12 @@ class NotificationExpandService : AccessibilityService() {
                 return false
             }
 
+            if (isLikelyAlreadyExpanded(clickableParent)) {
+                processedCandidates.addAll(keys)
+                Log.d(TAG, "Skipping already-expanded grouped notification: text=$text")
+                return false
+            }
+
             processedCandidates.addAll(keys)
             Log.d(TAG, "Attempting click on grouped-notification container: text=$text")
             val clicked = clickableParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -358,6 +375,7 @@ class NotificationExpandService : AccessibilityService() {
                 return false
             }
 
+            suppressUserActionClicks = true
             lastGlobalClickTime = SystemClock.uptimeMillis()
             scheduleRescan(GLOBAL_CLICK_COOLDOWN_MS)
             Log.d(TAG, "Click performed; waiting for SystemUI update before next scan")
@@ -427,7 +445,21 @@ class NotificationExpandService : AccessibilityService() {
         activeSessionLocked = null
         activeShadeWindowId = null
         hasRunInitialUnlockedBatch = false
+        suppressUserActionClicks = false
         lockScreenReadyAt = 0L
+    }
+
+    private fun shouldIgnoreScanAfterExpand(reason: String): Boolean {
+        if (!suppressUserActionClicks) {
+            return false
+        }
+        if (reason == "scheduled rescan" ||
+            reason == "shade expanded broadcast" ||
+            reason == "eventType=${AccessibilityEvent.TYPE_VIEW_SCROLLED}"
+        ) {
+            return false
+        }
+        return reason.startsWith("eventType=")
     }
 
     private fun scheduleRescan(delayMillis: Long) {
@@ -452,7 +484,7 @@ class NotificationExpandService : AccessibilityService() {
         clickableParent: AccessibilityNodeInfo
     ): List<String> {
         val keys = mutableListOf(identityKey(countNode))
-        val signature = rowSignature(clickableParent, countNode.text?.toString())
+        val signature = rowSignature(clickableParent)
         if (!signature.isNullOrEmpty()) {
             keys.add("sig:${clickableParent.windowId}:$signature")
         }
@@ -463,9 +495,35 @@ class NotificationExpandService : AccessibilityService() {
         return "id:${node.windowId}:${node.hashCode()}"
     }
 
-    private fun rowSignature(row: AccessibilityNodeInfo, countText: String?): String? {
-        findTextByViewIds(row, APP_NAME_VIEW_IDS)?.let { return it }
-        return findFirstMeaningfulText(row, countText)
+    private fun rowSignature(row: AccessibilityNodeInfo): String? {
+        return findTextByViewIds(row, APP_NAME_VIEW_IDS)
+    }
+
+    private fun isLikelyAlreadyExpanded(clickableParent: AccessibilityNodeInfo): Boolean {
+        val maxCollapsedPx =
+            (MAX_COLLAPSED_GROUP_HEIGHT_DP * resources.displayMetrics.density).toInt()
+        val bounds = Rect()
+        clickableParent.getBoundsInScreen(bounds)
+        if (bounds.height() > maxCollapsedPx) {
+            return true
+        }
+
+        var current: AccessibilityNodeInfo? = clickableParent.parent
+        var depth = 0
+        while (current != null && depth < 8) {
+            val className = current.className?.toString().orEmpty()
+            if (className.contains("ExpandableNotificationRow")) {
+                current.getBoundsInScreen(bounds)
+                val expanded = bounds.height() > maxCollapsedPx
+                current.recycle()
+                return expanded
+            }
+            val parent = current.parent
+            current.recycle()
+            current = parent
+            depth++
+        }
+        return false
     }
 
     private fun findTextByViewIds(node: AccessibilityNodeInfo, viewIds: Set<String>): String? {
@@ -480,25 +538,6 @@ class NotificationExpandService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             try {
                 findTextByViewIds(child, viewIds)?.let { return it }
-            } finally {
-                child.recycle()
-            }
-        }
-        return null
-    }
-
-    private fun findFirstMeaningfulText(node: AccessibilityNodeInfo, countText: String?): String? {
-        if (node.viewIdResourceName != GROUP_CHILD_COUNT_ID) {
-            val text = meaningfulNodeText(node, countText)
-            if (!text.isNullOrEmpty()) {
-                return text
-            }
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            try {
-                findFirstMeaningfulText(child, countText)?.let { return it }
             } finally {
                 child.recycle()
             }
@@ -542,6 +581,7 @@ class NotificationExpandService : AccessibilityService() {
             "com.android.systemui:id/app_name"
         )
         private val GROUP_COUNT_TEXT = Regex("""^\+?\d+$""")
+        private const val MAX_COLLAPSED_GROUP_HEIGHT_DP = 140f
         private const val GLOBAL_CLICK_COOLDOWN_MS = 450L
         private const val LOCK_SCREEN_WAKE_SETTLE_MS = 750L
         private const val SHADE_WINDOW_LIFECYCLE_CHANGES =

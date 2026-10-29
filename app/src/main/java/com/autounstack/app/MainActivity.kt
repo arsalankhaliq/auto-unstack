@@ -180,6 +180,14 @@ private fun AppContent(preferencesManager: PreferencesManager) {
                         .fillMaxWidth()
                         .padding(top = 8.dp)
                 )
+
+                Text(
+                    text = "Version 1.2.2",
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
             }
         }
     }
