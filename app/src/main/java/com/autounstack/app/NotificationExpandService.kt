@@ -495,8 +495,28 @@ class NotificationExpandService : AccessibilityService() {
         return "id:${node.windowId}:${node.hashCode()}"
     }
 
-    private fun rowSignature(row: AccessibilityNodeInfo): String? {
-        return findTextByViewIds(row, APP_NAME_VIEW_IDS)
+    private fun rowSignature(clickableParent: AccessibilityNodeInfo): String? {
+        // Walk up to the full ExpandableNotificationRow so we still find the app name
+        // even when clickableParent is only the inner header/pill container.
+        var current: AccessibilityNodeInfo? = clickableParent
+        var depth = 0
+        while (current != null && depth < 8) {
+            val className = current.className?.toString().orEmpty()
+            if (className.contains("ExpandableNotificationRow")) {
+                val text = findTextByViewIds(current, APP_NAME_VIEW_IDS)
+                if (current !== clickableParent) {
+                    current.recycle()
+                }
+                return text
+            }
+            val parent = current.parent
+            if (current !== clickableParent) {
+                current.recycle()
+            }
+            current = parent
+            depth++
+        }
+        return findTextByViewIds(clickableParent, APP_NAME_VIEW_IDS)
     }
 
     private fun isLikelyAlreadyExpanded(clickableParent: AccessibilityNodeInfo): Boolean {
@@ -514,9 +534,11 @@ class NotificationExpandService : AccessibilityService() {
             val className = current.className?.toString().orEmpty()
             if (className.contains("ExpandableNotificationRow")) {
                 current.getBoundsInScreen(bounds)
-                val expanded = bounds.height() > maxCollapsedPx
+                val heightExpanded = bounds.height() > maxCollapsedPx
+                // Also check structure in case the row is partially scrolled off-screen
+                val structurallyExpanded = hasMultipleNotificationRows(current)
                 current.recycle()
-                return expanded
+                return heightExpanded || structurallyExpanded
             }
             val parent = current.parent
             current.recycle()
@@ -524,6 +546,29 @@ class NotificationExpandService : AccessibilityService() {
             depth++
         }
         return false
+    }
+
+    private fun hasMultipleNotificationRows(groupRow: AccessibilityNodeInfo): Boolean {
+        var nestedRowCount = 0
+        fun traverse(node: AccessibilityNodeInfo) {
+            if (nestedRowCount > 1) return
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                try {
+                    val cls = child.className?.toString().orEmpty()
+                    if (cls.contains("ExpandableNotificationRow")) {
+                        nestedRowCount++
+                        if (nestedRowCount > 1) return
+                    } else {
+                        traverse(child)
+                    }
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+        traverse(groupRow)
+        return nestedRowCount > 1
     }
 
     private fun findTextByViewIds(node: AccessibilityNodeInfo, viewIds: Set<String>): String? {

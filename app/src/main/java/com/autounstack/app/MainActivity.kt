@@ -182,7 +182,7 @@ private fun AppContent(preferencesManager: PreferencesManager) {
                 )
 
                 Text(
-                    text = "Version 1.2.2",
+                    text = "Version 1.2.3",
                     fontSize = 12.sp,
                     modifier = Modifier
                         .fillMaxWidth()
