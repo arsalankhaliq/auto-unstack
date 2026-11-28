@@ -240,9 +240,7 @@ class NotificationExpandService : AccessibilityService() {
 
         orderedCandidates.forEach { candidate ->
             try {
-                val clicked = candidate.clickableNode.performAction(
-                    AccessibilityNodeInfo.ACTION_CLICK
-                )
+                val clicked = performExpandOrClick(candidate.clickableNode)
                 if (clicked) {
                     clickedAny = true
                     Log.d(TAG, "Initial unlocked batch clicked grouped notification")
@@ -276,7 +274,7 @@ class NotificationExpandService : AccessibilityService() {
                     val alreadyQueued = candidates.any { candidate ->
                         candidate.keys.any { it in keys }
                     }
-                    if (isLikelyAlreadyExpanded(clickableParent)) {
+                    if (isNestedChildNotification(clickableParent) || isLikelyAlreadyExpanded(clickableParent)) {
                         processedCandidates.addAll(keys)
                     } else if (keys.none { it in processedCandidates } && !alreadyQueued) {
                         val bounds = Rect()
@@ -360,7 +358,7 @@ class NotificationExpandService : AccessibilityService() {
                 return false
             }
 
-            if (isLikelyAlreadyExpanded(clickableParent)) {
+            if (isNestedChildNotification(clickableParent) || isLikelyAlreadyExpanded(clickableParent)) {
                 processedCandidates.addAll(keys)
                 Log.d(TAG, "Skipping already-expanded grouped notification: text=$text")
                 return false
@@ -368,7 +366,7 @@ class NotificationExpandService : AccessibilityService() {
 
             processedCandidates.addAll(keys)
             Log.d(TAG, "Attempting click on grouped-notification container: text=$text")
-            val clicked = clickableParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            val clicked = performExpandOrClick(clickableParent)
             if (!clicked) {
                 processedCandidates.removeAll(keys.toSet())
                 Log.d(TAG, "Click failed for grouped-notification count: text=$text")
@@ -504,6 +502,7 @@ class NotificationExpandService : AccessibilityService() {
             val className = current.className?.toString().orEmpty()
             if (className.contains("ExpandableNotificationRow")) {
                 val text = findTextByViewIds(current, APP_NAME_VIEW_IDS)
+                    ?: findTextByViewIds(current, TITLE_VIEW_IDS)
                 if (current !== clickableParent) {
                     current.recycle()
                 }
@@ -517,6 +516,7 @@ class NotificationExpandService : AccessibilityService() {
             depth++
         }
         return findTextByViewIds(clickableParent, APP_NAME_VIEW_IDS)
+            ?: findTextByViewIds(clickableParent, TITLE_VIEW_IDS)
     }
 
     private fun isLikelyAlreadyExpanded(clickableParent: AccessibilityNodeInfo): Boolean {
@@ -609,6 +609,44 @@ class NotificationExpandService : AccessibilityService() {
         return !GROUP_COUNT_TEXT.matches(text)
     }
 
+    private fun isNestedChildNotification(clickableParent: AccessibilityNodeInfo): Boolean {
+        var current: AccessibilityNodeInfo? = clickableParent
+        var depth = 0
+        var rowDepthCount = 0
+
+        while (current != null && depth < 12) {
+            val className = current.className?.toString().orEmpty()
+            if (className.contains("ExpandableNotificationRow")) {
+                rowDepthCount++
+                if (rowDepthCount > 1) {
+                    if (current !== clickableParent) current.recycle()
+                    return true
+                }
+            }
+            val parent = current.parent
+            if (current !== clickableParent) {
+                current.recycle()
+            }
+            current = parent
+            depth++
+        }
+        return false
+    }
+
+    private fun performExpandOrClick(node: AccessibilityNodeInfo): Boolean {
+        val supportsExpand = node.actionList.any {
+            it.id == AccessibilityNodeInfo.ACTION_EXPAND
+        }
+        val action = if (supportsExpand) {
+            AccessibilityNodeInfo.ACTION_EXPAND
+        } else {
+            AccessibilityNodeInfo.ACTION_CLICK
+        }
+        return node.performAction(action)
+    }
+
+
+
     private data class InitialCandidate(
         val keys: List<String>,
         val bottom: Int,
@@ -625,6 +663,7 @@ class NotificationExpandService : AccessibilityService() {
             "android:id/app_name_text",
             "com.android.systemui:id/app_name"
         )
+        private val TITLE_VIEW_IDS = setOf("android:id/title")
         private val GROUP_COUNT_TEXT = Regex("""^\+?\d+$""")
         private const val MAX_COLLAPSED_GROUP_HEIGHT_DP = 140f
         private const val GLOBAL_CLICK_COOLDOWN_MS = 450L
